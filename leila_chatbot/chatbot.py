@@ -1,9 +1,13 @@
+from operator import itemgetter
 import dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.prompts import PromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, ChatPromptTemplate
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain.prompts import PromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.vectorstores import Chroma
 from langchain.schema.runnable import RunnablePassthrough
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 
 # https://realpython.com/build-llm-rag-chatbot-with-langchain/
 # https://python.langchain.com/docs/expression_language/
@@ -48,11 +52,12 @@ query_human_prompt = HumanMessagePromptTemplate(
     )
 )
 
-messages = [query_system_prompt, query_human_prompt]
-
-query_prompt_template = ChatPromptTemplate(
-    input_variables=["context", "question"],
-    messages=messages,
+query_prompt_template = ChatPromptTemplate.from_messages(
+    [
+        query_system_prompt,
+        MessagesPlaceholder(variable_name="chat_history"),
+        query_human_prompt
+    ]
 )
 
 chat_model = ChatOpenAI(model="gpt-3.5-turbo-0125", temperature=0)
@@ -62,12 +67,20 @@ output_parser = StrOutputParser()
 query_vector_db = Chroma(
     persist_directory=QUERY_CHROMA_PATH,
     embedding_function=OpenAIEmbeddings()
-    )
+)
 
 query_retriever = query_vector_db.as_retriever(k=10)
 
-query_chain = (
-    {"context": query_retriever, "question": RunnablePassthrough()}
-    | query_prompt_template 
-    | chat_model 
-    | output_parser)
+# https://github.com/langchain-ai/langchain/discussions/16582
+context = itemgetter("question") | query_retriever
+first_step = RunnablePassthrough.assign(context=context)
+query_chain = first_step | query_prompt_template | chat_model | output_parser
+
+query_chain_with_history = RunnableWithMessageHistory(
+    query_chain,
+    lambda session_id: SQLChatMessageHistory(
+        session_id=session_id, connection_string="sqlite:///data/chat_history.db"
+    ),
+    input_messages_key="question",
+    history_messages_key="chat_history",
+)
